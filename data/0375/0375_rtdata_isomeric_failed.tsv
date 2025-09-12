@@ -1,0 +1,12 @@
+id	name	formula	rt	smiles.std	status	inchi.std	inchikey.std
+0375_00004	Adenine	C5H5N5	3.45		missing SMILES		
+0375_00015	Citric acid	C6H8O7	16.425		missing SMILES		
+0375_00032	GSSG	C20H32N6O12S2	15.525		missing SMILES		
+0375_00039	Isocitric acid	C6H8O7	15.967		missing SMILES		
+0375_00045	Malonic Acid	C3H4O4	9.283		missing SMILES		
+0375_00052	Nicotinic acid	C6H5NO2	2.283		missing SMILES		
+0375_00057	PEP	C3H5O6P	13.55		missing SMILES		
+0375_00060	Phosphoglyceric acid A	C3H7O7P	13.583		missing SMILES		
+0375_00066	Succinic Acid	C4H6O4	11.967		missing SMILES		
+0375_00068	Thiamine	C12H17N4OS	12.9		missing SMILES		
+0375_00070	Triose phosphate	C3H7O6P	11.1		missing SMILES		
