@@ -11,6 +11,9 @@ import math
 import random
 from typing import List, Tuple, Optional
 from collections import defaultdict
+import umap
+import matplotlib.cm as cm
+import seaborn as sns
 
 import numpy as np
 import pandas as pd
@@ -50,6 +53,8 @@ data_files = [
     'data/0323/0323_rtdata_canonical_success.tsv',
     'data/0331/0331_rtdata_canonical_success.tsv'
 ]
+
+data_name = [s.split('/')[1] for s in data_files]
 
 # ------------------------------
 # Utils
@@ -608,6 +613,182 @@ def plot_scatter(y_true, y_pred, save_path=None):
     plt.show()
 
 
+def extract_film_features(model, loader, device, task_stats):
+    model.eval()
+    features, rts, task_ids = [], [], []
+    with torch.no_grad():
+        for data in loader:
+            data = data.to(device)
+            x, edge_index, batch = data.x, data.edge_index, data.batch
+            graph_tasks = data.task.view(-1).to(batch.device)
+
+            # 前向传播至 pooling 前
+            h = model.embed(x)
+            for conv, bn in zip(model.convs, model.bns):
+                h = conv(h, edge_index)
+                h = bn(h)
+                h = F.relu(h)
+            g = global_add_pool(h, batch)
+
+            # Adapter + Cross-Stitch
+            g_adjusted = torch.zeros_like(g)
+            for t_id in range(model.num_tasks):
+                mask = (graph_tasks == t_id)
+                if mask.sum() > 0:
+                    g_adjusted[mask] = model.adapters[t_id](g[mask])
+            g = g_adjusted
+            if model.use_cross_stitch:
+                g = model.cross_stitch(g, graph_tasks)
+
+            # Task embedding 与 FiLM 调制
+            task_emb = model.task_embed(graph_tasks)
+            gamma1, beta1 = model.head_film_gen_1(task_emb)
+            gamma2, beta2 = model.head_film_gen_2(task_emb)
+            
+            # FiLM-modulated feature
+            g_film = gamma2 * (F.relu(model.head.fc1(gamma1 * g + beta1))) + beta2
+            features.append(g_film.cpu().numpy())
+
+            # 反归一化 RT
+            y_orig = []
+            for y_norm, t_id in zip(data.y.view(-1).cpu().numpy(), graph_tasks.cpu().numpy()):
+                mean, std = task_stats[int(t_id)]
+                y_orig.append(y_norm * std + mean)
+            rts.append(np.array(y_orig))
+
+            task_ids.append(graph_tasks.cpu().numpy())
+
+    features = np.concatenate(features, axis=0)
+    rts = np.concatenate(rts, axis=0)
+    task_ids = np.concatenate(task_ids, axis=0)
+    return features, rts, task_ids
+
+
+def extract_adapter_crossstitch_features(model, loader, device, task_stats):
+    model.eval()
+    features, rts, task_ids = [], [], []
+    with torch.no_grad():
+        for data in loader:
+            data = data.to(device)
+            x, edge_index, batch = data.x, data.edge_index, data.batch
+            graph_tasks = data.task.view(-1).to(batch.device)
+
+            # 前向传播至 pooling 前
+            h = model.embed(x)
+            for conv, bn in zip(model.convs, model.bns):
+                h = conv(h, edge_index)
+                h = bn(h)
+                h = F.relu(h)
+            g = global_add_pool(h, batch)
+
+            # Adapter + Cross-Stitch
+            g_adjusted = torch.zeros_like(g)
+            for t_id in range(model.num_tasks):
+                mask = (graph_tasks == t_id)
+                if mask.sum() > 0:
+                    g_adjusted[mask] = model.adapters[t_id](g[mask])
+            g = g_adjusted
+            if model.use_cross_stitch:
+                g = model.cross_stitch(g, graph_tasks)
+            features.append(g.cpu().numpy())
+
+            y_orig = []
+            for y_norm, t_id in zip(data.y.view(-1).cpu().numpy(), graph_tasks.cpu().numpy()):
+                mean, std = task_stats[int(t_id)]
+                y_orig.append(y_norm * std + mean)
+            rts.append(np.array(y_orig))
+
+            task_ids.append(graph_tasks.cpu().numpy())
+
+    features = np.concatenate(features, axis=0)
+    rts = np.concatenate(rts, axis=0)
+    task_ids = np.concatenate(task_ids, axis=0)
+    return features, rts, task_ids
+
+
+def extract_pre_adapter_features(model, loader, device, task_stats):
+    model.eval()
+    features, rts, task_ids = [], [], []
+    with torch.no_grad():
+        for data in loader:
+            data = data.to(device)
+            x, edge_index, batch = data.x, data.edge_index, data.batch
+            graph_tasks = data.task.view(-1).to(batch.device)
+
+            # 前向传播至 pooling 前
+            h = model.embed(x)
+            for conv, bn in zip(model.convs, model.bns):
+                h = conv(h, edge_index)
+                h = bn(h)
+                h = F.relu(h)
+            g = global_add_pool(h, batch)
+
+            features.append(g.cpu().numpy())
+            y_orig = []
+            for y_norm, t_id in zip(data.y.view(-1).cpu().numpy(), graph_tasks.cpu().numpy()):
+                mean, std = task_stats[int(t_id)]
+                y_orig.append(y_norm * std + mean)
+            rts.append(np.array(y_orig))
+            task_ids.append(graph_tasks.cpu().numpy())
+
+    features = np.concatenate(features, axis=0)
+    rts = np.concatenate(rts, axis=0)
+    task_ids = np.concatenate(task_ids, axis=0)
+    return features, rts, task_ids
+
+
+def extract_film_params(model, device="cpu"):
+    model.eval()
+    model = model.to(device)
+
+    gamma_beta_dict = {}
+
+    with torch.no_grad():
+        for t_id in range(model.num_tasks):
+            # 获取任务嵌入
+            task_id_tensor = torch.tensor([t_id], dtype=torch.long, device=device)
+            task_emb = model.task_embed(task_id_tensor)
+
+            # 生成 gamma / beta
+            gamma1, beta1 = model.head_film_gen_1(task_emb)
+            gamma2, beta2 = model.head_film_gen_2(task_emb)
+
+            # 保存为 numpy 数组
+            gamma_beta_dict[t_id] = {
+                "gamma1": gamma1.cpu().numpy().flatten(),
+                "beta1":  beta1.cpu().numpy().flatten(),
+                "gamma2": gamma2.cpu().numpy().flatten(),
+                "beta2":  beta2.cpu().numpy().flatten(),
+            }
+
+    return gamma_beta_dict
+
+
+def extract_cross_stitch_alpha(model):
+    alpha_matrices = {}
+
+    if isinstance(model.cross_stitch, (nn.ModuleList, list)):
+        for i, cs in enumerate(model.cross_stitch):
+            if hasattr(cs, "alpha"):
+                alpha_matrices[f"cross_stitch_{i}"] = cs.alpha.detach().cpu().numpy()
+    else:
+        # 单层 Cross-Stitch
+        if hasattr(model.cross_stitch, "alpha"):
+            alpha_matrices["cross_stitch"] = model.cross_stitch.alpha.detach().cpu().numpy()
+
+    return alpha_matrices
+
+
+def extract_adapter_weights(model):
+    adapter_weights = {}
+    for i, adapter in enumerate(model.adapters):
+        params = []
+        for name, p in adapter.named_parameters():
+            if p.requires_grad:
+                params.append(p.detach().cpu().flatten().numpy())
+        adapter_weights[i] = np.concatenate(params)
+    return adapter_weights
+
 
 # ------------------------------
 # Main
@@ -647,14 +828,14 @@ if __name__ == "__main__":
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=0)
 
 
-    # model = GINRegressor(
-    #     node_dim=node_dim,
-    #     num_tasks=len(data_files),
-    #     task_emb_dim=len(data_files),
-    #     hidden=64,
-    #     layers=4,
-    #     dropout=0.02
-    # ).to(device)
+    model = GINRegressor(
+        node_dim=node_dim,
+        num_tasks=len(data_files),
+        task_emb_dim=len(data_files),
+        hidden=64,
+        layers=4,
+        dropout=0.02
+    ).to(device)
 
 
     # model = GCNRegressor(
@@ -667,14 +848,14 @@ if __name__ == "__main__":
     # ).to(device)
 
 
-    model = GATRegressor(
-        node_dim=node_dim,
-        num_tasks=len(data_files),
-        task_emb_dim=len(data_files),
-        hidden=64,
-        layers=4,
-        dropout=0.02
-    ).to(device)
+    # model = GATRegressor(
+    #     node_dim=node_dim,
+    #     num_tasks=len(data_files),
+    #     task_emb_dim=len(data_files),
+    #     hidden=64,
+    #     layers=4,
+    #     dropout=0.02
+    # ).to(device)
 
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.0005)
@@ -704,3 +885,65 @@ if __name__ == "__main__":
 
     # Scatter plot
     plot_scatter(y_test, p_test)
+
+
+    # Feature plot
+    features, rts, task_ids = extract_film_features(model, test_loader, device, task_stats)
+    reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, random_state=42)
+    embedding = reducer.fit_transform(features)
+    palette = sns.color_palette("plasma", as_cmap=True)
+    
+    plt.figure(figsize=(6, 4), dpi = 300)
+    unique_tasks = np.arange(4)
+    markers = ['o', 's', 'D', '^']
+
+    for i, t in enumerate(np.unique(unique_tasks)):
+        mask = task_ids == t
+        sc = plt.scatter(
+            embedding[mask, 0],
+            embedding[mask, 1],
+            c=rts[mask],
+            cmap='plasma',
+            s=40,
+            alpha=0.8,
+            marker=markers[i % len(markers)],
+            edgecolor='black',
+            linewidth=0.3,
+            label=f'Task {t}'
+        )
+    
+    plt.xlabel("UMAP-1")
+    plt.ylabel("UMAP-2")
+    cbar = plt.colorbar(sc)
+    cbar.set_label('Retention Time (s)', fontsize=12)
+    plt.legend(bbox_to_anchor=(1.3, 1), loc='upper left')
+    plt.tight_layout()
+    plt.show()
+
+
+    # FiLM correlation plot
+    film_params = extract_film_params(model, device)
+    task_vectors = []
+    for t_id, params in film_params.items():
+        vec = np.concatenate([params["gamma1"], params["gamma2"]])
+        # vec = np.concatenate([params["beta1"], params["beta2"]])
+        task_vectors.append(vec)
+    task_vectors = np.stack(task_vectors)  # shape: (num_tasks, total_dim)
+
+    corr_matrix = np.corrcoef(task_vectors)
+    corr_matrix = np.round(corr_matrix, 2)
+
+    plt.figure(figsize=(7, 7), dpi = 300)
+    sns.heatmap(
+        corr_matrix,
+        annot=True,
+        cmap='Blues',
+        square=True,
+        cbar=False,
+        xticklabels=data_name,
+        yticklabels=data_name,
+    )
+    plt.tight_layout()
+    plt.show()
+    
+    
